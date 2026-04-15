@@ -278,10 +278,7 @@ def main() -> None:
     speech_recognizer.recognized.connect(on_recognized)
     speech_recognizer.canceled.connect(on_canceled)
     speech_recognizer.start_continuous_recognition_async().get()
-
-    # Bot opens the conversation (no user input yet)
-    opening = bot.handle_turn(None)
-    speak_text(opening)
+    # Waiting for customer to speak first
 
     try:
         while not shutdown_event.is_set():

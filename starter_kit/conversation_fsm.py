@@ -70,6 +70,7 @@ class SessionData:
     recommended_product: Optional[ProductType] = None
     current_offer: Optional[Offer] = None
     alternative_offer: Optional[Offer] = None    # cheaper plan shown after main rejection
+    alternative_just_accepted: bool = False      # True for one turn after alternative accepted
     main_offer_accepted: Optional[bool] = None   # None = not yet decided
     tv_accepted: Optional[bool] = None
     appointment_set: bool = False
@@ -236,6 +237,7 @@ class ConversationFSM:
                 # Switch current offer to the cheaper alternative
                 d.current_offer = d.alternative_offer
                 d.alternative_offer = None
+                d.alternative_just_accepted = True
                 if d.recommended_product == "FIX":
                     self.state = State.SCHEDULE_APPOINTMENT
                 else:
@@ -483,8 +485,9 @@ _EXTRACTION_HANDLERS = {
 
 _STATE_PROMPTS: dict[State, str] = {
     State.GREETING: (
-        "Greet the customer warmly. Say you are an A1 assistant and you're calling to help find the best internet plan. "
-        "Ask if they are already an A1 customer."
+        "The customer has just called in. Answer the call warmly and professionally as an A1 sales consultant. "
+        "Introduce yourself briefly (your name is Alex, you work for A1). "
+        "Ask how you can help them today."
     ),
     State.ASK_EXISTING_CUSTOMER: (
         "Ask the customer if they are already an A1 customer (mobile, TV, or internet). "

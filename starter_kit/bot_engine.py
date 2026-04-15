@@ -160,6 +160,13 @@ class BotEngine:
             offer_context += f"\n\nCurrent offer details: {self.fsm.data.current_offer.summary()}"
         if self.fsm.data.alternative_offer:
             offer_context += f"\nAlternative (cheaper) offer: {self.fsm.data.alternative_offer.summary()}"
+        if self.fsm.data.alternative_just_accepted:
+            offer_context += (
+                "\nIMPORTANT: The customer just accepted the downgraded plan above. "
+                "First briefly confirm the new plan (one sentence), then IMMEDIATELY pitch the TV addon as a separate offer. "
+                "Do not close the call — the TV offer is the next step."
+            )
+            self.fsm.data.alternative_just_accepted = False  # consume the flag
         if self.fsm.data.first_name:
             offer_context += f"\nCustomer name: {self.fsm.data.first_name}"
         if self.fsm.data.suggested_address:

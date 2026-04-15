@@ -1,11 +1,16 @@
 """
 Business logic: choose Fix vs Cube, select the best plan, handle TV upsell.
 
-Tariff data based on tariffs.png:
-  FIX plans:  50, 250, 650, 1050 Mbps
-  CUBE plans: 10, 30, 60, 140, 220, 310 Mbps   (illustrative tiers visible in image)
-  TV addon:   +26 EUR / month (Aria Box Cube)
+Tariff data (updated from product catalog):
+  FIX (Fiber): 50, 100, 150, 250, 500, 1000 Mbps
+  CUBE (5G):   50, 100, 150, 250, 500 Mbps + A1 Xcite (100 Mbps, no contract)
+  TV addons:   Xplore TV S (3.90 EUR), Xplore TV M (4.95 EUR first year → 9.90 EUR)
+
+Pricing shown is months 7–24 (ongoing price after free period).
+Most plans: first 6 months free, then regular price kicks in.
 """
+
+from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Literal, Optional
@@ -14,38 +19,180 @@ from typing import Literal, Optional
 # Tariff definitions
 # ---------------------------------------------------------------------------
 
+# FIX = Fiber (Glasfaser + Internet line)
 FIX_PLANS = [
-    {"speed": 50,   "price": 19.90, "name": "Fix 50"},
-    {"speed": 250,  "price": 29.90, "name": "Fix 250"},
-    {"speed": 650,  "price": 39.90, "name": "Fix 650"},
-    {"speed": 1050, "price": 49.90, "name": "Fix 1050"},
+    {
+        "product_id": "INT50",
+        "name": "Internet 50",
+        "speed": 50,
+        "upload": 15,
+        "price": 22.32,       # months 7-24 (20% discount)
+        "price_full": 27.90,  # months 25+
+        "setup_fee": 29.90,
+        "promo": "First 6 months free, then 22.32 EUR/mo until month 24",
+    },
+    {
+        "product_id": "INT100",
+        "name": "Internet 100",
+        "speed": 100,
+        "upload": 20,
+        "price": 29.90,
+        "price_full": 29.90,
+        "setup_fee": 29.90,
+        "promo": "First 6 months free",
+    },
+    {
+        "product_id": "INT150",
+        "name": "Internet 150",
+        "speed": 150,
+        "upload": 30,
+        "price": 29.90,
+        "price_full": 29.90,
+        "setup_fee": 29.90,
+        "promo": "First 6 months free",
+    },
+    {
+        "product_id": "GF250",
+        "name": "Glasfaser Internet 250",
+        "speed": 250,
+        "upload": 100,
+        "price": 29.90,
+        "price_full": 29.90,
+        "setup_fee": 29.90,
+        "promo": "First 6 months free",
+    },
+    {
+        "product_id": "GF500",
+        "name": "Glasfaser Internet 500",
+        "speed": 500,
+        "upload": 100,
+        "price": 43.92,       # months 7-24 (20% discount)
+        "price_full": 54.90,  # months 25+
+        "setup_fee": 29.90,
+        "promo": "First 6 months free, then 20% discount until month 24",
+    },
+    {
+        "product_id": "GF1000",
+        "name": "Glasfaser Internet 1000",
+        "speed": 1000,
+        "upload": 250,
+        "price": 74.90,
+        "price_full": 74.90,
+        "setup_fee": 29.90,
+        "promo": "First 6 months free",
+    },
 ]
 
+# CUBE = 5G wireless home internet
 CUBE_PLANS = [
-    {"speed": 10,  "price": 19.90, "name": "Cube 10"},
-    {"speed": 30,  "price": 24.90, "name": "Cube 30"},
-    {"speed": 60,  "price": 29.90, "name": "Cube 60"},
-    {"speed": 140, "price": 34.90, "name": "Cube 140"},
-    {"speed": 220, "price": 39.90, "name": "Cube 220"},
-    {"speed": 310, "price": 44.90, "name": "Cube 310"},
+    {
+        "product_id": "CUBE50",
+        "name": "Cube Internet 50",
+        "speed": 50,
+        "upload": 15,
+        "price": 22.32,       # months 7-24 (20% discount)
+        "price_full": 27.90,  # months 25+
+        "setup_fee": 0.0,
+        "promo": "First 6 months free, then 20% discount until month 24",
+    },
+    {
+        "product_id": "XCITE",
+        "name": "A1 Xcite Cube",
+        "speed": 100,
+        "upload": 20,
+        "price": 22.90,
+        "price_full": 22.90,
+        "setup_fee": 0.0,
+        "promo": "No contract, no setup fee, modem included",
+    },
+    {
+        "product_id": "CUBE100",
+        "name": "Cube Internet 100",
+        "speed": 100,
+        "upload": 20,
+        "price": 29.90,
+        "price_full": 29.90,
+        "setup_fee": 0.0,
+        "promo": "First 6 months free",
+    },
+    {
+        "product_id": "CUBE150",
+        "name": "Cube Internet 150",
+        "speed": 150,
+        "upload": 30,
+        "price": 29.90,
+        "price_full": 29.90,
+        "setup_fee": 0.0,
+        "promo": "First 6 months free",
+    },
+    {
+        "product_id": "CUBE250",
+        "name": "Cube Internet 250",
+        "speed": 250,
+        "upload": 50,
+        "price": 29.90,
+        "price_full": 29.90,
+        "setup_fee": 0.0,
+        "promo": "First 6 months free",
+    },
+    {
+        "product_id": "CUBE500",
+        "name": "Cube Internet 500",
+        "speed": 500,
+        "upload": 70,
+        "price": 54.90,
+        "price_full": 54.90,
+        "setup_fee": 0.0,
+        "promo": "First 6 months free",
+    },
 ]
 
-TV_ADDON_PRICE = 26.0
-TV_ADDON_NAME = "Aria Box Cube (TV)"
+# TV addons
+TV_PLANS = [
+    {
+        "product_id": "TVS",
+        "name": "A1 Xplore TV S",
+        "price": 3.90,
+        "price_full": 3.90,
+        "description": "65+ channels, TV box required",
+    },
+    {
+        "product_id": "TVM",
+        "name": "A1 Xplore TV M",
+        "price": 4.95,        # months 1-12 (half price)
+        "price_full": 9.90,   # months 13+
+        "description": "7-day replay TV, 65+ channels — half price first year",
+    },
+]
 
-VOICE_ONLY_DISCOUNT = 5.0  # EUR/month discount for voice-only customers
+# Default TV upsell: TV M (better value proposition for sales)
+TV_ADDON_PRICE = TV_PLANS[1]["price"]        # 4.95 EUR/mo (first year)
+TV_ADDON_PRICE_FULL = TV_PLANS[1]["price_full"]  # 9.90 EUR/mo after
+TV_ADDON_NAME = TV_PLANS[1]["name"]          # A1 Xplore TV M
 
+VOICE_ONLY_DISCOUNT = 5.0  # EUR/month discount for existing customers
 
 ProductType = Literal["FIX", "CUBE"]
 
 
+# ---------------------------------------------------------------------------
+# Offer dataclass
+# ---------------------------------------------------------------------------
+
 @dataclass
 class Offer:
     product: ProductType
+    product_id: str
     plan_name: str
     speed: int
-    price: float
+    upload: int
+    price: float          # ongoing price (months 7-24)
+    price_full: float     # price after month 24
+    setup_fee: float
+    promo: str            # promotional description
     tv_included: bool = False
+    tv_name: str = ""
+    tv_price: float = 0.0
     voice_only_discount: bool = False
     notes: list[str] = field(default_factory=list)
 
@@ -53,26 +200,36 @@ class Offer:
     def effective_price(self) -> float:
         total = self.price
         if self.tv_included:
-            total += TV_ADDON_PRICE
+            total += self.tv_price
         if self.voice_only_discount:
             total -= VOICE_ONLY_DISCOUNT
         return total
 
     def summary(self) -> str:
-        parts = [f"{self.plan_name} — {self.speed} Mbps — {self.price:.2f} EUR/month"]
+        parts = [
+            f"{self.plan_name} — {self.speed} Mbps down / {self.upload} Mbps up"
+            f" — {self.price:.2f} EUR/month (from month 7)",
+            f"Promotion: {self.promo}",
+        ]
+        if self.setup_fee > 0:
+            parts.append(f"Setup fee: {self.setup_fee:.2f} EUR (one-time)")
         if self.voice_only_discount:
-            parts.append(f"Voice-only discount: -{VOICE_ONLY_DISCOUNT:.2f} EUR")
+            parts.append(f"Existing customer discount: -{VOICE_ONLY_DISCOUNT:.2f} EUR/month")
         if self.tv_included:
-            parts.append(f"+ {TV_ADDON_NAME}: +{TV_ADDON_PRICE:.2f} EUR")
-        parts.append(f"Total: {self.effective_price:.2f} EUR/month")
+            parts.append(f"+ {self.tv_name}: +{self.tv_price:.2f} EUR/month (first year)")
+        parts.append(f"Total from month 7: {self.effective_price:.2f} EUR/month")
         return " | ".join(parts)
 
 
-def _best_plan(plans: list[dict], max_speed: int) -> dict:
-    """Return the fastest plan that does not exceed max_speed."""
+# ---------------------------------------------------------------------------
+# Plan selection helpers
+# ---------------------------------------------------------------------------
+
+def _best_plan(plans: list[dict], max_speed: int) -> Optional[dict]:
+    """Return the fastest plan that does not exceed max_speed, or None if none qualify."""
     eligible = [p for p in plans if p["speed"] <= max_speed]
     if not eligible:
-        return plans[0]  # fallback to cheapest
+        return None
     return max(eligible, key=lambda p: p["speed"])
 
 
@@ -82,15 +239,19 @@ def recommend_product(
     cube_max_speed: int,
 ) -> ProductType:
     """
-    Level 1 logic from first_page.png:
-      - age < 26  → Cube
-      - mix speed (Fix) > 50 Mbps → Fix, else → Cube
+    Product recommendation logic:
+      - age < 26  → Cube if available, else Fix
+      - Fix speed at address >= 50 Mbps → Fix (fiber preferred)
+      - otherwise → Cube if available, else Fix
     """
+    fix_available = _best_plan(FIX_PLANS, fix_max_speed) is not None
+    cube_available = _best_plan(CUBE_PLANS, cube_max_speed) is not None
+
     if age < 26:
-        return "CUBE"
-    if fix_max_speed > 50:
+        return "CUBE" if cube_available else "FIX"
+    if fix_max_speed >= 50 and fix_available:
         return "FIX"
-    return "CUBE"
+    return "CUBE" if cube_available else "FIX"
 
 
 def build_offer(
@@ -101,49 +262,76 @@ def build_offer(
 ) -> Offer:
     if product == "FIX":
         plan = _best_plan(FIX_PLANS, fix_max_speed)
+        # Fallback to CUBE if no FIX plan fits the address speed
+        if plan is None:
+            product = "CUBE"
+            plan = _best_plan(CUBE_PLANS, cube_max_speed)
     else:
         plan = _best_plan(CUBE_PLANS, cube_max_speed)
+        # Fallback to FIX if no CUBE plan fits the address speed
+        if plan is None:
+            product = "FIX"
+            plan = _best_plan(FIX_PLANS, fix_max_speed)
 
-    offer = Offer(
+    if plan is None:
+        raise ValueError(
+            f"No eligible plan found for fix_max_speed={fix_max_speed}, cube_max_speed={cube_max_speed}"
+        )
+
+    return Offer(
         product=product,
+        product_id=plan["product_id"],
         plan_name=plan["name"],
         speed=plan["speed"],
+        upload=plan["upload"],
         price=plan["price"],
+        price_full=plan["price_full"],
+        setup_fee=plan["setup_fee"],
+        promo=plan["promo"],
         voice_only_discount=is_existing_customer,
     )
-    return offer
 
 
 def build_alternative_offer(
     current_offer: Offer,
     fix_max_speed: int,
     cube_max_speed: int,
-) -> Optional["Offer"]:
+) -> Optional[Offer]:
     """
-    Return a cheaper plan of the same product type, or None if no cheaper option exists.
-    Respects address speed limits.
+    Return the next cheaper plan of the same product type within address speed limits.
+    Returns None if no cheaper option exists.
     """
     plans = FIX_PLANS if current_offer.product == "FIX" else CUBE_PLANS
     max_speed = fix_max_speed if current_offer.product == "FIX" else cube_max_speed
 
-    eligible = [p for p in plans if p["speed"] <= max_speed and p["speed"] < current_offer.speed]
+    eligible = [
+        p for p in plans
+        if p["speed"] <= max_speed and p["speed"] < current_offer.speed
+    ]
     if not eligible:
         return None
 
-    cheaper = max(eligible, key=lambda p: p["speed"])  # best of the cheaper options
+    plan = max(eligible, key=lambda p: p["speed"])
     return Offer(
         product=current_offer.product,
-        plan_name=cheaper["name"],
-        speed=cheaper["speed"],
-        price=cheaper["price"],
+        product_id=plan["product_id"],
+        plan_name=plan["name"],
+        speed=plan["speed"],
+        upload=plan["upload"],
+        price=plan["price"],
+        price_full=plan["price_full"],
+        setup_fee=plan["setup_fee"],
+        promo=plan["promo"],
         voice_only_discount=current_offer.voice_only_discount,
     )
 
 
 def add_tv(offer: Offer) -> Offer:
-    """Return a copy of the offer with TV addon included."""
+    """Return a copy of the offer with the TV M addon included."""
     import copy
     new_offer = copy.copy(offer)
     new_offer.tv_included = True
+    new_offer.tv_name = TV_ADDON_NAME
+    new_offer.tv_price = TV_ADDON_PRICE
     new_offer.notes = list(offer.notes) + [f"TV addon ({TV_ADDON_NAME}) added"]
     return new_offer

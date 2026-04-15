@@ -395,10 +395,7 @@ def _run_bot(shutdown_event: threading.Event) -> None:
     speech_recognizer.recognized.connect(on_recognized)
     speech_recognizer.canceled.connect(on_canceled)
     speech_recognizer.start_continuous_recognition_async().get()
-    logger.info("STT started — listening for speech (language: %s)", recognition_language)
-
-    opening = bot.handle_turn(None)
-    speak_text(opening)
+    logger.info("STT started — waiting for customer to speak (language: %s)", recognition_language)
 
     try:
         while not shutdown_event.is_set():
