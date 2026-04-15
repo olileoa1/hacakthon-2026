@@ -8,7 +8,7 @@ Tariff data based on tariffs.png:
 """
 
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Literal, Optional
 
 # ---------------------------------------------------------------------------
 # Tariff definitions
@@ -112,6 +112,32 @@ def build_offer(
         voice_only_discount=is_existing_customer,
     )
     return offer
+
+
+def build_alternative_offer(
+    current_offer: Offer,
+    fix_max_speed: int,
+    cube_max_speed: int,
+) -> Optional["Offer"]:
+    """
+    Return a cheaper plan of the same product type, or None if no cheaper option exists.
+    Respects address speed limits.
+    """
+    plans = FIX_PLANS if current_offer.product == "FIX" else CUBE_PLANS
+    max_speed = fix_max_speed if current_offer.product == "FIX" else cube_max_speed
+
+    eligible = [p for p in plans if p["speed"] <= max_speed and p["speed"] < current_offer.speed]
+    if not eligible:
+        return None
+
+    cheaper = max(eligible, key=lambda p: p["speed"])  # best of the cheaper options
+    return Offer(
+        product=current_offer.product,
+        plan_name=cheaper["name"],
+        speed=cheaper["speed"],
+        price=cheaper["price"],
+        voice_only_discount=current_offer.voice_only_discount,
+    )
 
 
 def add_tv(offer: Offer) -> Offer:

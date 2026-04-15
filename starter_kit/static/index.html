@@ -274,6 +274,10 @@
   .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
   .btn-secondary:hover { background: var(--border); }
 
+  .btn-interrupt { background: #4a2000; color: #fb923c; border: 1px solid #92400e; }
+  .btn-interrupt:hover { background: #7c3a00; }
+  .btn-interrupt:disabled { background: #333; color: #666; border-color: #444; cursor: not-allowed; }
+
   /* ── Logs pane ── */
   #pane-logs { flex-direction: column; }
 
@@ -392,6 +396,7 @@
     <div class="controls">
       <button class="btn btn-primary" id="btn-start">Start Call</button>
       <button class="btn btn-danger" id="btn-stop" disabled>Stop Call</button>
+      <button class="btn btn-interrupt" id="btn-interrupt" disabled title="Interrupt bot and start listening (Space)">&#9646;&#9646; Interrupt</button>
       <button class="btn btn-secondary" id="btn-clear">Clear</button>
     </div>
   </div>
@@ -476,6 +481,7 @@ function updateStatus(status, msg) {
   }
   document.getElementById('btn-start').disabled = botActive;
   document.getElementById('btn-stop').disabled = !botActive;
+  document.getElementById('btn-interrupt').disabled = !botActive;
 }
 
 // ── Transcript ───────────────────────────────────────────────────────────────
@@ -563,6 +569,17 @@ document.getElementById('btn-start').addEventListener('click', async () => {
 
 document.getElementById('btn-stop').addEventListener('click', async () => {
   await fetch('/stop', {method: 'POST'});
+});
+
+document.getElementById('btn-interrupt').addEventListener('click', async () => {
+  await fetch('/interrupt', {method: 'POST'});
+});
+
+document.addEventListener('keydown', async (e) => {
+  if (e.code === 'Space' && e.target === document.body && botActive) {
+    e.preventDefault();
+    await fetch('/interrupt', {method: 'POST'});
+  }
 });
 
 document.getElementById('btn-clear').addEventListener('click', () => {

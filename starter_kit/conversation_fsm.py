@@ -13,16 +13,19 @@ from dataclasses import dataclass, field
 from enum import Enum, auto
 from typing import Any, Optional
 
-from data_service import AddressInfo, CustomerInfo, lookup_address, lookup_customer_by_name
-from offer_engine import Offer, ProductType, add_tv, build_offer, recommend_product
+from data_service import (AddressInfo, CustomerInfo, find_similar_address,
+                          lookup_address, lookup_customer_by_id, lookup_customer_by_name)
+from offer_engine import Offer, ProductType, add_tv, build_alternative_offer, build_offer, recommend_product
 
 logger = logging.getLogger(__name__)
 
 
 class State(Enum):
     GREETING = auto()
+    ASK_EXISTING_CUSTOMER = auto()  # moved first — determines next path
     ASK_NAME = auto()
-    ASK_EXISTING_CUSTOMER = auto()
+    ASK_SUBSCRIBER_ID = auto()      # only for existing customers
+    VERIFY_CUSTOMER = auto()        # auto: lookup by ID, fuzzy-match name
     ASK_AGE = auto()
     ASK_USERS = auto()
     ASK_ADDRESS_PLZ = auto()
@@ -31,6 +34,7 @@ class State(Enum):
     ADDRESS_LOOKUP = auto()
     RECOMMEND = auto()
     NEGOTIATE_MAIN = auto()       # present main offer, wait for ACCEPT/REJECT
+    ALTERNATIVE_OFFER = auto()    # cheaper plan after main offer rejected
     TV_UPSELL = auto()            # offer TV addon
     TV_FINAL_OFFER = auto()       # final TV offer (after first reject)
     SCHEDULE_APPOINTMENT = auto() # FIX: propose tech appointment
@@ -38,6 +42,10 @@ class State(Enum):
     FINAL_OFFER = auto()          # last chance offer (voice discount)
     CALL_CLOSED_SUCCESS = auto()
     CALL_CLOSED_AGENT = auto()    # hand off to human agent
+    CUSTOMER_UNVERIFIED = auto()  # ID/name mismatch — re-ask if really an A1 customer
+    CONFIRM_ADDRESS = auto()      # fuzzy match found — ask customer to confirm
+    NO_COVERAGE = auto()          # address not found in service area
+    UNDERAGE = auto()             # customer under 18
     DONE = auto()
 
 
@@ -47,6 +55,8 @@ class SessionData:
     first_name: str = ""
     surname: str = ""
     is_existing_customer: bool = False
+    subscriber_id: str = ""           # ID given by customer for verification
+    customer_verified: bool = False   # True when ID + name matched in DB
     customer_info: Optional[CustomerInfo] = None
     age: Optional[int] = None
     num_users: Optional[int] = None
@@ -54,10 +64,12 @@ class SessionData:
     street_name: str = ""
     door_number: str = ""
     address_info: Optional[AddressInfo] = None
+    suggested_address: Optional[AddressInfo] = None  # fuzzy match candidate
 
     # Phase 2
     recommended_product: Optional[ProductType] = None
     current_offer: Optional[Offer] = None
+    alternative_offer: Optional[Offer] = None    # cheaper plan shown after main rejection
     main_offer_accepted: Optional[bool] = None   # None = not yet decided
     tv_accepted: Optional[bool] = None
     appointment_set: bool = False
@@ -119,6 +131,9 @@ class ConversationFSM:
     def is_terminal(self) -> bool:
         return self.state in (State.DONE,)
 
+    def is_underage(self) -> bool:
+        return self.data.age is not None and self.data.age < 18
+
     def session_summary(self) -> str:
         return json.dumps(self.data.to_dict(), ensure_ascii=False, indent=2)
 
@@ -131,18 +146,34 @@ class ConversationFSM:
         d = self.data
 
         if s == State.GREETING:
+            self.state = State.ASK_EXISTING_CUSTOMER
+
+        elif s == State.ASK_EXISTING_CUSTOMER:
+            # is_existing_customer is set — always advance to ASK_NAME
             self.state = State.ASK_NAME
 
         elif s == State.ASK_NAME:
             if d.first_name and d.surname:
-                self.state = State.ASK_EXISTING_CUSTOMER
+                if d.is_existing_customer:
+                    self.state = State.ASK_SUBSCRIBER_ID
+                else:
+                    self.state = State.ASK_AGE
 
-        elif s == State.ASK_EXISTING_CUSTOMER:
+        elif s == State.ASK_SUBSCRIBER_ID:
+            if d.subscriber_id:
+                self.state = State.VERIFY_CUSTOMER
+                self._do_verify_customer()
+
+        elif s == State.VERIFY_CUSTOMER:
+            # Auto state — always move to ASK_AGE after verification attempt
             self.state = State.ASK_AGE
 
         elif s == State.ASK_AGE:
             if d.age is not None:
-                self.state = State.ASK_USERS
+                if d.age < 18:
+                    self.state = State.UNDERAGE
+                else:
+                    self.state = State.ASK_USERS
 
         elif s == State.ASK_USERS:
             if d.num_users is not None:
@@ -162,8 +193,22 @@ class ConversationFSM:
                 self._do_address_lookup()
 
         elif s == State.ADDRESS_LOOKUP:
-            self.state = State.RECOMMEND
-            self._do_recommend()
+            if d.address_info is not None:
+                self.state = State.RECOMMEND
+                self._do_recommend()
+            elif d.suggested_address is not None:
+                self.state = State.CONFIRM_ADDRESS
+            else:
+                self.state = State.NO_COVERAGE
+
+        elif s == State.CONFIRM_ADDRESS:
+            if d.address_info is not None:
+                # Customer confirmed the suggested address
+                self.state = State.RECOMMEND
+                self._do_recommend()
+            elif d.suggested_address is None:
+                # Customer rejected — no coverage
+                self.state = State.NO_COVERAGE
 
         elif s == State.RECOMMEND:
             # RECOMMEND doubles as the accept/reject state for the main offer.
@@ -175,8 +220,30 @@ class ConversationFSM:
                 else:
                     self.state = State.TV_UPSELL
             elif d.main_offer_accepted is False:
-                self.state = State.TV_UPSELL
+                # Try to offer a cheaper alternative before going to TV upsell
+                ai = d.address_info
+                alt = build_alternative_offer(d.current_offer, ai.fix_max_speed, ai.cube_max_speed)
+                if alt:
+                    d.alternative_offer = alt
+                    d.main_offer_accepted = None  # reset for ALTERNATIVE_OFFER decision
+                    self.state = State.ALTERNATIVE_OFFER
+                else:
+                    self.state = State.TV_UPSELL
             # else: still waiting for decision — stay in RECOMMEND
+
+        elif s == State.ALTERNATIVE_OFFER:
+            if d.main_offer_accepted is True:
+                # Switch current offer to the cheaper alternative
+                d.current_offer = d.alternative_offer
+                d.alternative_offer = None
+                if d.recommended_product == "FIX":
+                    self.state = State.SCHEDULE_APPOINTMENT
+                else:
+                    self.state = State.TV_UPSELL
+            elif d.main_offer_accepted is False:
+                d.alternative_offer = None
+                self.state = State.TV_UPSELL
+            # else: waiting
 
         elif s == State.NEGOTIATE_MAIN:
             # Legacy state kept for compatibility; skip straight to RECOMMEND logic
@@ -209,6 +276,7 @@ class ConversationFSM:
                 self.state = State.CALL_CLOSED_SUCCESS
             elif d.tv_accepted is False:
                 d.tv_accepted = None  # reset for FINAL_OFFER
+                d.main_offer_accepted = None  # reset so FINAL_OFFER waits for a fresh decision
                 self.state = State.FINAL_OFFER
             # else: waiting
 
@@ -230,27 +298,78 @@ class ConversationFSM:
             d.call_closed_successfully = True
             self.state = State.CALL_CLOSED_SUCCESS
 
-        elif s in (State.CALL_CLOSED_SUCCESS, State.CALL_CLOSED_AGENT):
+        elif s in (State.CALL_CLOSED_SUCCESS, State.CALL_CLOSED_AGENT,
+                   State.NO_COVERAGE, State.UNDERAGE):
             self.state = State.DONE
 
     def _do_address_lookup(self) -> None:
+        # Step 1: exact match (100% — no confirmation needed)
         try:
             info = lookup_address(self.data.plz, self.data.street_name, self.data.door_number)
         except Exception as exc:
-            logger.warning("Address lookup error: %s — using fallback", exc)
+            logger.warning("Address lookup error: %s", exc)
             info = None
+
         if info:
             self.data.address_info = info
+            logger.info("Exact address match found — proceeding without confirmation")
+            return
+
+        # Step 2: fuzzy match
+        logger.info("Exact address not found: PLZ=%s street=%s door=%s — trying fuzzy match",
+                    self.data.plz, self.data.street_name, self.data.door_number)
+        try:
+            result = find_similar_address(self.data.plz, self.data.street_name, self.data.door_number)
+        except Exception as exc:
+            logger.warning("Fuzzy address lookup error: %s", exc)
+            result = None
+
+        if result is None:
+            # score < 60% — no coverage
+            logger.warning("No fuzzy match found (score < 60%%) — going to NO_COVERAGE")
+            return
+
+        suggestion, sim_score = result
+        logger.info("Fuzzy match: score=%.2f → %s %s %s",
+                    sim_score, suggestion.plz, suggestion.street_name, suggestion.door_number)
+
+        if sim_score >= 0.99:
+            # Essentially 100% — skip confirmation, proceed directly
+            self.data.address_info = suggestion
+            logger.info("Near-perfect fuzzy match (score=%.2f) — skipping confirmation", sim_score)
         else:
-            logger.warning("Address not found in CSV, using fallback speeds")
-            from data_service import AddressInfo
-            self.data.address_info = AddressInfo(
-                plz=self.data.plz,
-                door_number=self.data.door_number,
-                street_name=self.data.street_name,
-                fix_max_speed=250,
-                cube_max_speed=130,
-            )
+            # > 60% but not 100% — ask customer to confirm
+            self.data.suggested_address = suggestion
+
+    def _do_verify_customer(self) -> None:
+        """Look up customer by subscriber ID and fuzzy-match the provided name."""
+        import difflib
+        customer = lookup_customer_by_id(self.data.subscriber_id)
+        if not customer:
+            logger.warning("Subscriber ID %s not found in database", self.data.subscriber_id)
+            self.data.is_existing_customer = False
+            return
+
+        # Fuzzy match: compare provided name against DB name
+        provided = f"{self.data.first_name} {self.data.surname}".strip().lower()
+        db_name  = f"{customer.first_name} {customer.surname}".strip().lower()
+        similarity = difflib.SequenceMatcher(None, provided, db_name).ratio()
+        logger.info("Customer verification: provided=%r db=%r similarity=%.2f",
+                    provided, db_name, similarity)
+
+        NAME_MATCH_THRESHOLD = 0.6
+        if similarity >= NAME_MATCH_THRESHOLD:
+            self.data.customer_info    = customer
+            self.data.customer_verified = True
+            # Use DB name as canonical (fixes STT mis-recognition)
+            self.data.first_name = customer.first_name
+            self.data.surname    = customer.surname
+            logger.info("Customer verified: %s %s (id=%s)",
+                        customer.first_name, customer.surname, customer.customer_id)
+        else:
+            logger.warning("Name mismatch — treating as unverified (similarity=%.2f)", similarity)
+            self.data.is_existing_customer = False
+            self.data.customer_verified    = False
 
     def _do_recommend(self) -> None:
         ai = self.data.address_info
@@ -310,6 +429,20 @@ def _handle_set_door(fsm: ConversationFSM, args: dict) -> None:
     fsm.data.door_number = str(args.get("door_number", "")).strip()
 
 
+def _handle_confirm_address(fsm: ConversationFSM, args: dict) -> None:
+    if args.get("accepted"):
+        # Use the suggested address as confirmed
+        fsm.data.address_info = fsm.data.suggested_address
+        fsm.data.suggested_address = None
+    else:
+        # Customer rejected suggestion — clear it to trigger NO_COVERAGE
+        fsm.data.suggested_address = None
+
+
+def _handle_set_subscriber_id(fsm: ConversationFSM, args: dict) -> None:
+    fsm.data.subscriber_id = str(args.get("subscriber_id", "")).strip()
+
+
 def _handle_main_decision(fsm: ConversationFSM, args: dict) -> None:
     if "accepted" in args:
         fsm.data.main_offer_accepted = bool(args["accepted"])
@@ -329,6 +462,8 @@ def _handle_final_decision(fsm: ConversationFSM, args: dict) -> None:
 
 
 _EXTRACTION_HANDLERS = {
+    "confirm_address": _handle_confirm_address,
+    "set_subscriber_id": _handle_set_subscriber_id,
     "set_name": _handle_set_name,
     "set_existing_customer": _handle_set_existing,
     "set_age": _handle_set_age,
@@ -349,17 +484,26 @@ _EXTRACTION_HANDLERS = {
 _STATE_PROMPTS: dict[State, str] = {
     State.GREETING: (
         "Greet the customer warmly. Say you are an A1 assistant and you're calling to help find the best internet plan. "
-        "Ask for their first and last name."
-    ),
-    State.ASK_NAME: (
-        "Ask the customer for their first name and last name if not yet provided. "
-        "Be friendly and concise. "
-        "If you already have the first name but not the surname, ask specifically for the last name and offer to spell it out letter by letter if it helps (e.g. 'Could you spell your last name for me?'). "
-        "Accept any spelling attempt and confirm back what you heard."
+        "Ask if they are already an A1 customer."
     ),
     State.ASK_EXISTING_CUSTOMER: (
-        "Ask the customer if they are already an A1 customer. "
-        "Mention that existing customers get a special voice-only discount."
+        "Ask the customer if they are already an A1 customer (mobile, TV, or internet). "
+        "Mention that existing customers get a special voice-only discount of 5 EUR per month."
+    ),
+    State.ASK_NAME: (
+        "Ask the customer for their first name and last name. "
+        "Be friendly and concise. "
+        "If you already have the first name but not the surname, ask specifically for the last name and offer to spell it out letter by letter if it helps. "
+        "Accept any spelling attempt and confirm back what you heard."
+    ),
+    State.ASK_SUBSCRIBER_ID: (
+        "The customer is an existing A1 customer. "
+        "Ask them for their subscriber ID (customer number) so we can verify their account. "
+        "It's the number on their A1 bill or in their A1 online account. Keep it brief. "
+        "IMPORTANT: accept whatever number the customer gives — even a single digit. Do NOT question its length or format."
+    ),
+    State.VERIFY_CUSTOMER: (
+        "Tell the customer you are verifying their account, ask them to wait a moment."
     ),
     State.ASK_AGE: (
         "Ask the customer how old they are. Keep it natural and brief."
@@ -384,6 +528,12 @@ _STATE_PROMPTS: dict[State, str] = {
         "Mention the product name, speed, and monthly price clearly. "
         "If the customer is an existing customer, mention the 5 EUR/month voice-only discount. "
         "Ask clearly if they would like to proceed with this plan."
+    ),
+    State.ALTERNATIVE_OFFER: (
+        "The customer declined the main offer. You have a more affordable alternative plan available. "
+        "Present it positively — acknowledge their hesitation, then offer the cheaper plan as a great value option. "
+        "Mention the plan name, speed, and monthly price clearly. "
+        "The alternative offer details are in the context below. Ask if they'd like to go with this plan instead."
     ),
     State.NEGOTIATE_MAIN: (
         "The customer responded to the main offer. "
@@ -420,6 +570,25 @@ _STATE_PROMPTS: dict[State, str] = {
     State.CALL_CLOSED_AGENT: (
         "The customer was not ready to proceed. Thank them for their time, let them know an agent "
         "will follow up, and wish them a good day."
+    ),
+    State.CONFIRM_ADDRESS: (
+        "We could not find the exact address the customer gave us, but we found a similar one in our system. "
+        "Read the suggested address clearly (street name, house number, postal code) and ask the customer: "
+        "'Did you mean [address]?' Wait for a yes or no answer. "
+        "The suggested address details are provided in the context below."
+    ),
+    State.NO_COVERAGE: (
+        "Unfortunately, the address the customer provided is not in our service area. "
+        "Apologize sincerely and explain that A1 does not yet offer coverage at their address. "
+        "Let them know we are continuously expanding and encourage them to check back in the future. "
+        "Wish them a pleasant day and close the call warmly. Keep it brief — 2-3 sentences."
+    ),
+    State.UNDERAGE: (
+        "The customer is under 18 years old and cannot sign a contract independently. "
+        "Explain this politely — they need to be at least 18 to subscribe. "
+        "Suggest they could ask a parent or guardian to call on their behalf. "
+        "Thank them for their interest and wish them a great day. "
+        "Keep it brief and friendly. Do NOT ask any question at the end — simply close the conversation warmly."
     ),
     State.DONE: (
         "The conversation is complete."
@@ -477,6 +646,22 @@ _STATE_TOOLS: dict[State, list[dict]] = {
                         "is_existing_customer": {"type": "boolean"},
                     },
                     "required": ["is_existing_customer"],
+                },
+            },
+        }
+    ],
+    State.ASK_SUBSCRIBER_ID: [
+        {
+            "type": "function",
+            "function": {
+                "name": "set_subscriber_id",
+                "description": "Store the customer's subscriber/customer ID number. Accept ANY number the customer says, even a single digit like '1'. Do NOT validate length.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "subscriber_id": {"type": "string", "description": "The customer's A1 subscriber ID. Can be any length — even 1 digit. Accept as-is."},
+                    },
+                    "required": ["subscriber_id"],
                 },
             },
         }
@@ -561,7 +746,24 @@ _STATE_TOOLS: dict[State, list[dict]] = {
             },
         }
     ],
+    State.CONFIRM_ADDRESS: [
+        {
+            "type": "function",
+            "function": {
+                "name": "confirm_address",
+                "description": "Record whether the customer confirmed or rejected the suggested address.",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "accepted": {"type": "boolean", "description": "True if customer confirmed the address, False if rejected."}
+                    },
+                    "required": ["accepted"],
+                },
+            },
+        }
+    ],
     State.RECOMMEND: _ACCEPT_REJECT_TOOL("set_main_decision"),
+    State.ALTERNATIVE_OFFER: _ACCEPT_REJECT_TOOL("set_main_decision"),
     State.NEGOTIATE_MAIN: _ACCEPT_REJECT_TOOL("set_main_decision"),
     State.TV_UPSELL: _ACCEPT_REJECT_TOOL("set_tv_decision"),
     State.TV_FINAL_OFFER: _ACCEPT_REJECT_TOOL("set_tv_decision"),

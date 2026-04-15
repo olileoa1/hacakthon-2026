@@ -126,11 +126,47 @@ def _run_bot(shutdown_event: threading.Event) -> None:
     speech_config.speech_recognition_language = recognition_language
     speech_config.speech_synthesis_voice_name = voice_name
 
+    # Extend silence timeouts so users aren't cut off mid-sentence
+    speech_config.set_property(
+        speechsdk.PropertyId.SpeechServiceConnection_EndSilenceTimeoutMs, "1500"
+    )
+    speech_config.set_property(
+        speechsdk.PropertyId.SpeechServiceConnection_InitialSilenceTimeoutMs, "10000"
+    )
+
     audio_config = speechsdk.audio.AudioConfig(use_default_microphone=True)
     speaker_config = speechsdk.audio.AudioOutputConfig(use_default_speaker=True)
 
     speech_recognizer = speechsdk.SpeechRecognizer(speech_config=speech_config, audio_config=audio_config)
     speech_synthesizer = speechsdk.SpeechSynthesizer(speech_config=speech_config, audio_config=speaker_config)
+
+    # Boost recognition of domain-specific terms: product names, telco vocabulary, street names
+    phrase_list = speechsdk.PhraseListGrammar.from_recognizer(speech_recognizer)
+    _BOOST_PHRASES = [
+        # Products
+        "Fix", "Cube", "Fix 50", "Fix 250", "Fix 650", "Fix 1050",
+        "Cube 10", "Cube 30", "Cube 60", "Cube 140", "Cube 220", "Cube 310",
+        "Aria Box", "A1",
+        # Conversation keywords
+        "subscriber ID", "customer number", "PLZ", "postal code",
+        "yes", "no", "correct", "that's right", "exactly",
+        # Common address suffixes
+        "Street", "Avenue", "Road", "Lane", "Drive", "Boulevard", "Place", "Court",
+    ]
+    # Also add all street names from the address database
+    try:
+        from data_service import _ensure_loaded, _addresses as _addr_data
+        _ensure_loaded()
+        seen_streets: set[str] = set()
+        for _row in _addr_data:
+            s = _row.get("street_name", "").strip()
+            if s and s not in seen_streets:
+                phrase_list.addPhrase(s)
+                seen_streets.add(s)
+    except Exception as _e:
+        logger.warning("Could not load street names for phrase hints: %s", _e)
+    for phrase in _BOOST_PHRASES:
+        phrase_list.addPhrase(phrase)
 
     recognized_queue: queue.Queue = queue.Queue()
     speaking_lock = threading.Lock()
@@ -160,22 +196,28 @@ def _run_bot(shutdown_event: threading.Event) -> None:
         with speaking_lock:
             bot_is_speaking = True
             speech_started_at = None
+            # Stop STT while bot speaks — prevents microphone picking up speaker output
+            speech_recognizer.stop_continuous_recognition_async().get()
             logger.info("Bot: %s", text)
             _add_transcript("bot", text)
             try:
                 sentences = _split_sentences(text)
                 for sentence in sentences:
-                    if shutdown_event.is_set():
-                        break
+                    if shutdown_event.is_set() or not bot_is_speaking:
+                        break  # interrupted by manual Interrupt button
                     if not sentence:
                         continue
                     result = speech_synthesizer.speak_text_async(sentence).get()
+                    if result.reason == speechsdk.ResultReason.Canceled:
+                        break  # interrupted intentionally — not an error
                     if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted:
                         logger.error("TTS error: reason=%s", result.reason)
                         break
             finally:
                 bot_is_speaking = False
                 bot_stopped_speaking_at = time.monotonic()
+                # Restart STT after bot finishes — now only user voice will be heard
+                speech_recognizer.start_continuous_recognition_async().get()
 
     def interrupt_speech() -> None:
         try:
@@ -239,46 +281,112 @@ def _run_bot(shutdown_event: threading.Event) -> None:
             finally:
                 recognized_queue.task_done()
 
+    def _normalize_stt(text: str) -> str:
+        """
+        Post-process Azure STT output:
+        - Convert spelled-out digits to numerals ("one two three" → "123", "twenty nine" → "29")
+        - Strip trailing punctuation Azure sometimes appends
+        """
+        _ONES = {
+            "zero": "0", "one": "1", "two": "2", "three": "3", "four": "4",
+            "five": "5", "six": "6", "seven": "7", "eight": "8", "nine": "9",
+            "ten": "10", "eleven": "11", "twelve": "12", "thirteen": "13",
+            "fourteen": "14", "fifteen": "15", "sixteen": "16", "seventeen": "17",
+            "eighteen": "18", "nineteen": "19",
+        }
+        _TENS = {
+            "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+            "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90,
+        }
+
+        # Replace "twenty-nine" → "twenty nine" for uniform processing
+        text = text.replace("-", " ")
+
+        words = text.split()
+        result: list[str] = []
+        i = 0
+        while i < len(words):
+            w = words[i].lower().rstrip(".,!?")
+            # Two-word: "twenty one" → "21"
+            if w in _TENS and i + 1 < len(words):
+                next_w = words[i + 1].lower().rstrip(".,!?")
+                if next_w in _ONES:
+                    result.append(str(_TENS[w] + int(_ONES[next_w])))
+                    i += 2
+                    continue
+                else:
+                    result.append(str(_TENS[w]))
+                    i += 1
+                    continue
+            if w in _ONES:
+                result.append(_ONES[w])
+                i += 1
+                continue
+            # Keep original word (preserve original casing)
+            result.append(words[i])
+            i += 1
+
+        normalized = " ".join(result)
+
+        # Collapse sequences of single digits: "1 2 3 4" → "1234" (common for IDs/PLZ)
+        import re as _re
+        normalized = _re.sub(r'\b(\d)(?: (\d))+\b', lambda m: m.group(0).replace(" ", ""), normalized)
+
+        return normalized
+
     def on_recognized(evt: speechsdk.SpeechRecognitionEventArgs) -> None:
-        nonlocal speech_started_at
-        if bot_is_speaking:
-            logger.info("STT: ignored (bot speaking): %r", evt.result.text)
-            return
-        mute_remaining = POST_SPEECH_MUTE_SEC - (time.monotonic() - bot_stopped_speaking_at)
-        if mute_remaining > 0:
-            logger.info("STT: ignored (post-speech mute %.1fs left): %r", mute_remaining, evt.result.text)
-            return
+        nonlocal speech_started_at, bot_is_speaking
         if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
-            text = evt.result.text.strip()
-            logger.info("STT recognized: %r", text)
-            if text and len(text) >= 2:
+            raw = evt.result.text.strip()
+            if not raw or len(raw) < 2:
+                return
+            text = _normalize_stt(raw)
+            if raw != text:
+                logger.info("STT normalized: %r → %r", raw, text)
+            if bot_is_speaking:
+                # Barge-in via full recognized utterance — interrupt bot and process
+                logger.info("STT barge-in (recognized while bot speaking): %r", text)
+                bot_is_speaking = False
+                interrupt_speech()
                 speech_started_at = None
                 _queue_user_text(text)
-            else:
-                logger.info("STT: too short, ignored")
+                return
+            mute_remaining = POST_SPEECH_MUTE_SEC - (time.monotonic() - bot_stopped_speaking_at)
+            if mute_remaining > 0:
+                logger.info("STT: ignored (post-speech mute %.1fs left): %r", mute_remaining, text)
+                return
+            logger.info("STT recognized: %r", text)
+            speech_started_at = None
+            _queue_user_text(text)
         elif evt.result.reason == speechsdk.ResultReason.NoMatch:
             speech_started_at = None
             logger.info("STT: no match")
 
     def on_recognizing(evt: speechsdk.SpeechRecognitionEventArgs) -> None:
+        # STT is stopped while bot speaks, so this only fires when user talks
         nonlocal speech_started_at
         if evt.result.reason != speechsdk.ResultReason.RecognizingSpeech:
             return
         partial = evt.result.text.strip()
-        if not partial or bot_is_speaking:
+        if not partial:
             return
         logger.info("STT partial: %r", partial)
-        now = time.monotonic()
-        if speech_started_at is None:
-            speech_started_at = now
-            return
-        if now - speech_started_at >= barge_in_seconds:
-            interrupt_speech()
 
     def on_canceled(evt: speechsdk.SpeechRecognitionCanceledEventArgs) -> None:
         logger.warning("STT canceled: %s", evt.reason)
         if evt.reason == speechsdk.CancellationReason.Error:
             logger.error("STT error: %s — check AZURE_SPEECH_KEY and AZURE_SPEECH_REGION", evt.error_details)
+
+    global _interrupt_callback
+
+    def _do_interrupt():
+        nonlocal bot_is_speaking
+        if bot_is_speaking:
+            logger.info("Manual interrupt triggered")
+            bot_is_speaking = False
+            interrupt_speech()
+
+    _interrupt_callback = _do_interrupt
 
     worker_thread = threading.Thread(target=worker, daemon=True)
     worker_thread.start()
@@ -379,6 +487,17 @@ async def stop_bot() -> dict:
         _shutdown_event.set()
     _bot_active = False
     return {"ok": True}
+
+
+_interrupt_callback = None   # set by _run_bot
+
+
+@app.post("/interrupt")
+async def interrupt_bot() -> dict:
+    if _interrupt_callback:
+        _interrupt_callback()
+        return {"ok": True}
+    return {"ok": False, "msg": "Bot not running"}
 
 
 @app.get("/transcript")

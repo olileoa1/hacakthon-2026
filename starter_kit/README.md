@@ -28,11 +28,26 @@ AZURE_SPEECH_RECOGNITION_LANGUAGE=en-US
 
 ### 3. Run
 
+**Web server (recommended):**
+```bash
+python3 web_server.py
+```
+
+Open http://localhost:8000 in your browser.
+
+**Voice CLI (microphone-based):**
 ```bash
 python3 realtime_voice_chat.py
 ```
 
 Press **Ctrl+C** to stop. Session data (collected customer info + offer) is printed at the end.
+
+### Restart
+
+```bash
+# Kill whatever is on port 8000 and restart the web server
+lsof -ti:8000 | xargs kill -9 2>/dev/null; python3 web_server.py
+```
 
 ---
 

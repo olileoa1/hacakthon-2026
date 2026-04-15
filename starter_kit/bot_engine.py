@@ -81,7 +81,7 @@ class BotEngine:
             self._extract_slots(user_text)
 
         # Step 2: auto-advance through non-interactive states
-        while self.fsm.state in (State.ADDRESS_LOOKUP,):
+        while self.fsm.state in (State.ADDRESS_LOOKUP, State.VERIFY_CUSTOMER):
             self.fsm.force_advance()
 
         # Step 3: if terminal, just return closing line
@@ -92,8 +92,19 @@ class BotEngine:
         reply = self._generate_reply()
         self._history.append({"role": "assistant", "content": reply})
 
-        # Step 5: after GREETING, immediately advance so next user turn hits ASK_NAME
-        if self.fsm.state == State.GREETING:
+        # Step 5: advance FSM after generating the reply for certain states
+        # GREETING → so next user turn hits ASK_NAME
+        # Closing states → immediately go to DONE so worker shuts down without
+        #   waiting for another user turn
+        # Auto-advance only for states where we don't need to wait for user response.
+        # Closing states (CALL_CLOSED_*, FINAL_APPOINTMENT) are intentionally excluded
+        # so the bot waits for the customer to say goodbye before ending the call.
+        _AUTO_ADVANCE_AFTER_REPLY = (
+            State.GREETING,
+            State.UNDERAGE,
+            State.NO_COVERAGE,
+        )
+        if self.fsm.state in _AUTO_ADVANCE_AFTER_REPLY:
             self.fsm.force_advance()
 
         return reply
@@ -143,12 +154,32 @@ class BotEngine:
         """Generate the bot's spoken reply for the current FSM state."""
         state_instruction = self.fsm.get_bot_prompt()
 
-        # Inject offer details into the prompt when relevant
+        # Inject contextual details into the prompt
         offer_context = ""
         if self.fsm.data.current_offer:
-            offer_context = f"\n\nCurrent offer details: {self.fsm.data.current_offer.summary()}"
+            offer_context += f"\n\nCurrent offer details: {self.fsm.data.current_offer.summary()}"
+        if self.fsm.data.alternative_offer:
+            offer_context += f"\nAlternative (cheaper) offer: {self.fsm.data.alternative_offer.summary()}"
         if self.fsm.data.first_name:
             offer_context += f"\nCustomer name: {self.fsm.data.first_name}"
+        if self.fsm.data.suggested_address:
+            s = self.fsm.data.suggested_address
+            offer_context += (
+                f"\nSuggested address to confirm with customer: "
+                f"{s.street_name} {s.door_number}, PLZ {s.plz}"
+            )
+        if self.fsm.data.is_existing_customer and self.fsm.data.subscriber_id:
+            if self.fsm.data.customer_verified:
+                offer_context += (
+                    f"\nCustomer identity VERIFIED: subscriber ID {self.fsm.data.subscriber_id} "
+                    f"matches {self.fsm.data.first_name} {self.fsm.data.surname}. "
+                    "Greet them warmly by name and confirm their account has been found."
+                )
+            elif self.fsm.data.subscriber_id:
+                offer_context += (
+                    "\nCustomer identity could NOT be verified (ID not found or name mismatch). "
+                    "Do not mention the discount. Continue the conversation naturally."
+                )
 
         messages = self._build_messages(
             extra_instruction=state_instruction + offer_context
