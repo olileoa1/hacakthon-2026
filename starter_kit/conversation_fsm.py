@@ -353,7 +353,9 @@ _STATE_PROMPTS: dict[State, str] = {
     ),
     State.ASK_NAME: (
         "Ask the customer for their first name and last name if not yet provided. "
-        "Be friendly and concise."
+        "Be friendly and concise. "
+        "If you already have the first name but not the surname, ask specifically for the last name and offer to spell it out letter by letter if it helps (e.g. 'Could you spell your last name for me?'). "
+        "Accept any spelling attempt and confirm back what you heard."
     ),
     State.ASK_EXISTING_CUSTOMER: (
         "Ask the customer if they are already an A1 customer. "
@@ -451,7 +453,7 @@ _STATE_TOOLS: dict[State, list[dict]] = {
             "type": "function",
             "function": {
                 "name": "set_name",
-                "description": "Store the customer's first and last name.",
+                "description": "Store the customer's first and last name. Accept any phonetic spelling or letter-by-letter spelling of the surname.",
                 "parameters": {
                     "type": "object",
                     "properties": {

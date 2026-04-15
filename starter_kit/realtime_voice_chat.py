@@ -81,7 +81,7 @@ active_request_id = 0
 speech_started_at: float | None = None
 bot_is_speaking = False       # True while TTS is playing — mutes STT to prevent echo
 bot_stopped_speaking_at: float = 0.0  # monotonic time when TTS last finished
-POST_SPEECH_MUTE_SEC = 1.5    # ignore STT for this long after bot finishes speaking
+POST_SPEECH_MUTE_SEC = 0.5    # ignore STT for this long after bot finishes speaking
 
 barge_in_seconds = float(os.getenv("REALTIME_BARGE_IN_SECONDS", "2.0"))
 
@@ -103,27 +103,44 @@ def _save_session(summary_json: str) -> None:
 # TTS
 # ---------------------------------------------------------------------------
 
+def _split_sentences(text: str) -> list[str]:
+    """Split text into short sentences so Bluetooth stays active between chunks."""
+    import re
+    parts = re.split(r'(?<=[.!?])\s+', text.strip())
+    return [p.strip() for p in parts if p.strip()]
+
+
 def speak_text(text: str) -> None:
-    global bot_is_speaking, bot_stopped_speaking_at
+    global bot_is_speaking, bot_stopped_speaking_at, speech_started_at
     if not text:
         return
     with speaking_lock:
         bot_is_speaking = True
+        speech_started_at = None  # reset barge-in timer so stale events don't interrupt
         logger.info("Bot: %s", text)
-        # Stop STT while bot speaks to prevent echo
-        speech_recognizer.stop_continuous_recognition_async().get()
+        # Keep STT running during TTS to avoid Bluetooth HFP→A2DP profile switch.
+        # bot_is_speaking=True causes on_recognized/on_recognizing to ignore all events.
         try:
-            result = speech_synthesizer.speak_text_async(text).get()
-            if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted:
-                logger.error("TTS error: reason=%s", result.reason)
+            sentences = _split_sentences(text)
+            for sentence in sentences:
+                if not sentence:
+                    continue
+                logger.info("TTS chunk: %r", sentence[:60])
+                result = speech_synthesizer.speak_text_async(sentence).get()
+                if result.reason != speechsdk.ResultReason.SynthesizingAudioCompleted:
+                    logger.error("TTS error: reason=%s", result.reason)
+                    break
         finally:
             bot_is_speaking = False
             bot_stopped_speaking_at = time.monotonic()
-            # Resume STT after bot finishes
+            # Restart STT to flush echo from internal buffer, then resume
+            speech_recognizer.stop_continuous_recognition_async().get()
             speech_recognizer.start_continuous_recognition_async().get()
 
 
 def interrupt_speech() -> None:
+    import traceback
+    logger.info("interrupt_speech() called from:\n%s", "".join(traceback.format_stack(limit=5)))
     try:
         speech_synthesizer.stop_speaking_async().get()
     except Exception:
@@ -199,14 +216,20 @@ def worker() -> None:
 def on_recognized(evt: speechsdk.SpeechRecognitionEventArgs) -> None:
     global speech_started_at
     if bot_is_speaking:
+        logger.debug("STT: ignored (bot speaking): %r", evt.result.text)
         return  # bot's own voice echoing back
-    if time.monotonic() - bot_stopped_speaking_at < POST_SPEECH_MUTE_SEC:
+    mute_remaining = POST_SPEECH_MUTE_SEC - (time.monotonic() - bot_stopped_speaking_at)
+    if mute_remaining > 0:
+        logger.debug("STT: ignored (post-speech mute %.1fs left): %r", mute_remaining, evt.result.text)
         return  # STT result arrived just after bot finished — still echo
     if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
         text = evt.result.text.strip()
-        if text:
+        logger.info("STT recognized: %r", text)
+        if text and len(text) >= 2:
             speech_started_at = None
             _queue_user_text(text)
+        elif text:
+            logger.info("STT: ignored short/noise utterance: %r", text)
     elif evt.result.reason == speechsdk.ResultReason.NoMatch:
         speech_started_at = None
         logger.debug("STT: no match")
@@ -219,14 +242,8 @@ def on_recognizing(evt: speechsdk.SpeechRecognitionEventArgs) -> None:
     partial = evt.result.text.strip()
     if not partial:
         return
-    # If bot is speaking and user starts talking — that's a barge-in, allow it
+    # STT is stopped while bot speaks, so bot_is_speaking events are stale — ignore
     if bot_is_speaking:
-        now = time.monotonic()
-        if speech_started_at is None:
-            speech_started_at = now
-            return
-        if now - speech_started_at >= barge_in_seconds:
-            interrupt_speech()
         return
     now = time.monotonic()
     if speech_started_at is None:

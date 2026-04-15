@@ -1,0 +1,638 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>A1 Voice Bot</title>
+<style>
+  :root {
+    --bg: #0f1117;
+    --surface: #1a1d27;
+    --surface2: #22263a;
+    --border: #2e3350;
+    --accent: #e2001a;
+    --accent2: #ff6b6b;
+    --text: #e8eaf0;
+    --text2: #8b92b5;
+    --bot: #1e3a5f;
+    --bot-border: #2563eb;
+    --user: #1a3a2a;
+    --user-border: #16a34a;
+    --warn: #7c4a00;
+    --warn-text: #fbbf24;
+    --error: #4a0f0f;
+    --error-text: #f87171;
+    --info: #1a2a4a;
+    --info-text: #93c5fd;
+    --radius: 12px;
+    --radius-sm: 8px;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    background: var(--bg);
+    color: var(--text);
+    font-family: 'Segoe UI', system-ui, sans-serif;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  /* ── Header ── */
+  header {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 24px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    font-size: 1.2rem;
+    font-weight: 700;
+    letter-spacing: -.3px;
+  }
+
+  .logo-badge {
+    background: var(--accent);
+    color: #fff;
+    padding: 4px 10px;
+    border-radius: 6px;
+    font-size: .85rem;
+    font-weight: 800;
+    letter-spacing: .5px;
+  }
+
+  .header-right { display: flex; align-items: center; gap: 16px; }
+
+  #status-dot {
+    width: 10px; height: 10px;
+    border-radius: 50%;
+    background: #555;
+    transition: background .3s;
+  }
+  #status-dot.running { background: #22c55e; box-shadow: 0 0 8px #22c55e88; animation: pulse 1.5s infinite; }
+  #status-dot.stopped { background: #555; box-shadow: none; animation: none; }
+  #status-dot.error   { background: var(--accent2); }
+
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.5} }
+
+  #status-label { font-size: .85rem; color: var(--text2); }
+
+  /* ── Tabs ── */
+  .tabs {
+    display: flex;
+    border-bottom: 1px solid var(--border);
+    background: var(--surface);
+    flex-shrink: 0;
+  }
+
+  .tab {
+    padding: 10px 22px;
+    cursor: pointer;
+    font-size: .9rem;
+    color: var(--text2);
+    border-bottom: 2px solid transparent;
+    transition: all .2s;
+    user-select: none;
+  }
+
+  .tab.active { color: var(--text); border-bottom-color: var(--accent); }
+  .tab:hover:not(.active) { color: var(--text); background: var(--surface2); }
+
+  .tab-badge {
+    display: inline-block;
+    background: var(--accent);
+    color: #fff;
+    font-size: .7rem;
+    padding: 1px 6px;
+    border-radius: 10px;
+    margin-left: 6px;
+    min-width: 18px;
+    text-align: center;
+  }
+
+  /* ── Content panes ── */
+  .pane { display: none; flex: 1; overflow: hidden; flex-direction: column; }
+  .pane.active { display: flex; }
+
+  /* ── Conversation pane ── */
+  #pane-conversation {
+    flex-direction: row;
+    gap: 0;
+  }
+
+  .conversation-main {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  #transcript {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+  }
+
+  #transcript:empty::after {
+    content: 'Conversation will appear here once started…';
+    color: var(--text2);
+    font-style: italic;
+    margin: auto;
+    text-align: center;
+  }
+
+  .msg {
+    max-width: 72%;
+    padding: 12px 16px;
+    border-radius: var(--radius);
+    font-size: .95rem;
+    line-height: 1.5;
+    animation: fadeIn .25s ease;
+  }
+
+  @keyframes fadeIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:none} }
+
+  .msg.bot {
+    align-self: flex-start;
+    background: var(--bot);
+    border: 1px solid var(--bot-border);
+    border-bottom-left-radius: 4px;
+  }
+
+  .msg.user {
+    align-self: flex-end;
+    background: var(--user);
+    border: 1px solid var(--user-border);
+    border-bottom-right-radius: 4px;
+  }
+
+  .msg-label {
+    font-size: .72rem;
+    font-weight: 600;
+    letter-spacing: .5px;
+    margin-bottom: 4px;
+    text-transform: uppercase;
+  }
+
+  .msg.bot .msg-label { color: #60a5fa; }
+  .msg.user .msg-label { color: #4ade80; }
+
+  .msg-time { font-size: .7rem; color: var(--text2); margin-top: 4px; }
+
+  /* ── Session summary sidebar ── */
+  .session-sidebar {
+    width: 280px;
+    border-left: 1px solid var(--border);
+    background: var(--surface);
+    display: flex;
+    flex-direction: column;
+    overflow: hidden;
+  }
+
+  .sidebar-title {
+    padding: 14px 16px;
+    font-size: .8rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: .7px;
+    color: var(--text2);
+    border-bottom: 1px solid var(--border);
+  }
+
+  #session-data {
+    flex: 1;
+    overflow-y: auto;
+    padding: 12px;
+  }
+
+  .session-row {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    padding: 6px 0;
+    border-bottom: 1px solid var(--border);
+    font-size: .82rem;
+    gap: 8px;
+  }
+
+  .session-key { color: var(--text2); flex-shrink: 0; }
+  .session-val { color: var(--text); text-align: right; word-break: break-word; }
+
+  #fsm-state {
+    margin: 12px;
+    padding: 10px 14px;
+    background: var(--surface2);
+    border-radius: var(--radius-sm);
+    border: 1px solid var(--border);
+    font-size: .85rem;
+    color: var(--text2);
+  }
+
+  #fsm-state span { color: #a78bfa; font-weight: 600; }
+
+  /* ── Controls bar ── */
+  .controls {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 14px 20px;
+    background: var(--surface);
+    border-top: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+
+  .btn {
+    padding: 9px 22px;
+    border: none;
+    border-radius: var(--radius-sm);
+    font-size: .9rem;
+    font-weight: 600;
+    cursor: pointer;
+    transition: all .15s;
+  }
+
+  .btn-primary { background: var(--accent); color: #fff; }
+  .btn-primary:hover { background: #c0001500; background: #c00015; }
+  .btn-primary:disabled { background: #444; color: #888; cursor: not-allowed; }
+
+  .btn-danger { background: #7f1d1d; color: var(--accent2); }
+  .btn-danger:hover { background: #991b1b; }
+  .btn-danger:disabled { background: #333; color: #666; cursor: not-allowed; }
+
+  .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+  .btn-secondary:hover { background: var(--border); }
+
+  /* ── Logs pane ── */
+  #pane-logs { flex-direction: column; }
+
+  .logs-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 16px;
+    background: var(--surface);
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+    flex-wrap: wrap;
+  }
+
+  .logs-toolbar label { font-size: .85rem; color: var(--text2); }
+
+  .filter-btn {
+    padding: 4px 12px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    background: transparent;
+    color: var(--text2);
+    font-size: .8rem;
+    cursor: pointer;
+    transition: all .15s;
+  }
+
+  .filter-btn.active, .filter-btn:hover { background: var(--surface2); color: var(--text); }
+  .filter-btn.active { border-color: var(--accent); color: var(--text); }
+
+  #log-search {
+    margin-left: auto;
+    padding: 5px 12px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+    background: var(--surface2);
+    color: var(--text);
+    font-size: .82rem;
+    outline: none;
+    width: 200px;
+  }
+
+  #log-search:focus { border-color: var(--accent); }
+
+  #log-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 8px 12px;
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    font-family: 'Cascadia Code', 'Fira Code', 'Consolas', monospace;
+    font-size: .8rem;
+  }
+
+  #log-list:empty::after {
+    content: 'No log entries yet…';
+    color: var(--text2);
+    font-style: italic;
+    margin: 20px auto;
+    font-family: inherit;
+  }
+
+  .log-entry {
+    display: flex;
+    gap: 10px;
+    padding: 5px 8px;
+    border-radius: 6px;
+    border-left: 3px solid transparent;
+    animation: fadeIn .2s ease;
+  }
+
+  .log-entry.DEBUG  { background: #12131a; border-color: #444; color: #666; }
+  .log-entry.INFO   { background: var(--info); border-color: #3b82f6; color: var(--info-text); }
+  .log-entry.WARNING { background: var(--warn); border-color: #f59e0b; color: var(--warn-text); }
+  .log-entry.ERROR  { background: var(--error); border-color: #ef4444; color: var(--error-text); }
+  .log-entry.CRITICAL { background: #3b0000; border-color: #dc2626; color: #fca5a5; font-weight: 700; }
+
+  .log-time { color: inherit; opacity: .6; flex-shrink: 0; }
+  .log-level { font-weight: 700; width: 56px; flex-shrink: 0; }
+  .log-msg { flex: 1; white-space: pre-wrap; word-break: break-all; }
+
+  .log-clear { margin-left: auto; }
+
+  /* ── Scrollbars ── */
+  ::-webkit-scrollbar { width: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: #444; }
+</style>
+</head>
+<body>
+
+<!-- Header -->
+<header>
+  <div class="logo">
+    <span class="logo-badge">A1</span>
+    Voice Sales Bot
+  </div>
+  <div class="header-right">
+    <div id="status-dot" class="stopped"></div>
+    <span id="status-label">Stopped</span>
+  </div>
+</header>
+
+<!-- Tabs -->
+<div class="tabs">
+  <div class="tab active" data-tab="conversation">Conversation</div>
+  <div class="tab" data-tab="logs">Logs <span class="tab-badge" id="log-badge">0</span></div>
+</div>
+
+<!-- Conversation pane -->
+<div class="pane active" id="pane-conversation">
+  <div class="conversation-main">
+    <div id="transcript"></div>
+    <div class="controls">
+      <button class="btn btn-primary" id="btn-start">Start Call</button>
+      <button class="btn btn-danger" id="btn-stop" disabled>Stop Call</button>
+      <button class="btn btn-secondary" id="btn-clear">Clear</button>
+    </div>
+  </div>
+
+  <aside class="session-sidebar">
+    <div class="sidebar-title">Session Data</div>
+    <div id="fsm-state">State: <span id="fsm-state-val">—</span></div>
+    <div id="session-data"></div>
+  </aside>
+</div>
+
+<!-- Logs pane -->
+<div class="pane" id="pane-logs">
+  <div class="logs-toolbar">
+    <label>Filter:</label>
+    <button class="filter-btn active" data-level="ALL">All</button>
+    <button class="filter-btn" data-level="DEBUG">Debug</button>
+    <button class="filter-btn" data-level="INFO">Info</button>
+    <button class="filter-btn" data-level="WARNING">Warn</button>
+    <button class="filter-btn" data-level="ERROR">Error</button>
+    <input type="text" id="log-search" placeholder="Search logs…">
+    <button class="btn btn-secondary log-clear" id="btn-log-clear">Clear</button>
+  </div>
+  <div id="log-list"></div>
+</div>
+
+<script>
+// ── State ───────────────────────────────────────────────────────────────────
+let ws = null;
+let botActive = false;
+let logFilter = 'ALL';
+let logSearch = '';
+let logCount = 0;
+let allLogs = [];
+
+// ── WebSocket ────────────────────────────────────────────────────────────────
+function connectWS() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+
+  ws.onmessage = (ev) => {
+    const event = JSON.parse(ev.data);
+    handleEvent(event);
+  };
+
+  ws.onclose = () => {
+    setTimeout(connectWS, 2000);
+  };
+}
+
+function handleEvent(event) {
+  if (event.type === 'status') {
+    updateStatus(event.status, event.msg);
+    if (event.status === 'done' && event.summary) {
+      renderSessionData(event.summary);
+    }
+  } else if (event.type === 'transcript') {
+    appendMessage(event.role, event.text, event.ts);
+  } else if (event.type === 'log') {
+    appendLog(event);
+  }
+}
+
+// ── Status ───────────────────────────────────────────────────────────────────
+function updateStatus(status, msg) {
+  const dot = document.getElementById('status-dot');
+  const label = document.getElementById('status-label');
+  dot.className = status;
+  if (status === 'running') {
+    label.textContent = 'Live';
+    botActive = true;
+  } else if (status === 'stopped') {
+    label.textContent = 'Stopped';
+    botActive = false;
+  } else if (status === 'done') {
+    label.textContent = 'Call ended';
+    botActive = false;
+  } else if (status === 'error') {
+    label.textContent = msg || 'Error';
+    dot.className = 'error';
+    botActive = false;
+  }
+  document.getElementById('btn-start').disabled = botActive;
+  document.getElementById('btn-stop').disabled = !botActive;
+}
+
+// ── Transcript ───────────────────────────────────────────────────────────────
+function appendMessage(role, text, ts) {
+  const container = document.getElementById('transcript');
+  const div = document.createElement('div');
+  div.className = `msg ${role}`;
+  const time = ts ? new Date(ts).toLocaleTimeString() : '';
+  div.innerHTML = `
+    <div class="msg-label">${role === 'bot' ? 'A1 Bot' : 'Customer'}</div>
+    <div class="msg-text">${escapeHtml(text)}</div>
+    <div class="msg-time">${time}</div>
+  `;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+// ── Session Sidebar ──────────────────────────────────────────────────────────
+function renderSessionData(data) {
+  const container = document.getElementById('session-data');
+  container.innerHTML = '';
+  const flat = flattenObj(data);
+  for (const [k, v] of Object.entries(flat)) {
+    if (v === null || v === '' || v === false) continue;
+    const row = document.createElement('div');
+    row.className = 'session-row';
+    row.innerHTML = `<span class="session-key">${escapeHtml(k)}</span><span class="session-val">${escapeHtml(String(v))}</span>`;
+    container.appendChild(row);
+  }
+}
+
+function flattenObj(obj, prefix = '') {
+  const out = {};
+  for (const [k, v] of Object.entries(obj)) {
+    const key = prefix ? `${prefix}.${k}` : k;
+    if (v && typeof v === 'object' && !Array.isArray(v)) {
+      Object.assign(out, flattenObj(v, key));
+    } else {
+      out[key] = v;
+    }
+  }
+  return out;
+}
+
+// ── Logs ─────────────────────────────────────────────────────────────────────
+function appendLog(entry) {
+  allLogs.push(entry);
+  logCount++;
+  document.getElementById('log-badge').textContent = logCount;
+  if (matchesFilter(entry)) renderLogEntry(entry);
+}
+
+function matchesFilter(entry) {
+  if (logFilter !== 'ALL' && entry.level !== logFilter) return false;
+  if (logSearch && !entry.msg.toLowerCase().includes(logSearch)) return false;
+  return true;
+}
+
+function renderLogEntry(entry) {
+  const container = document.getElementById('log-list');
+  const div = document.createElement('div');
+  div.className = `log-entry ${entry.level}`;
+  const time = entry.ts ? new Date(entry.ts).toLocaleTimeString('en-US', {hour12: false, hour:'2-digit', minute:'2-digit', second:'2-digit'}) : '';
+  div.innerHTML = `
+    <span class="log-time">${time}</span>
+    <span class="log-level">${entry.level}</span>
+    <span class="log-msg">${escapeHtml(entry.msg)}</span>
+  `;
+  container.appendChild(div);
+  container.scrollTop = container.scrollHeight;
+}
+
+function rerenderLogs() {
+  const container = document.getElementById('log-list');
+  container.innerHTML = '';
+  for (const entry of allLogs) {
+    if (matchesFilter(entry)) renderLogEntry(entry);
+  }
+}
+
+// ── Controls ─────────────────────────────────────────────────────────────────
+document.getElementById('btn-start').addEventListener('click', async () => {
+  await fetch('/start', {method: 'POST'});
+});
+
+document.getElementById('btn-stop').addEventListener('click', async () => {
+  await fetch('/stop', {method: 'POST'});
+});
+
+document.getElementById('btn-clear').addEventListener('click', () => {
+  document.getElementById('transcript').innerHTML = '';
+  document.getElementById('session-data').innerHTML = '';
+});
+
+document.getElementById('btn-log-clear').addEventListener('click', () => {
+  allLogs = [];
+  logCount = 0;
+  document.getElementById('log-badge').textContent = '0';
+  document.getElementById('log-list').innerHTML = '';
+});
+
+// ── Tabs ─────────────────────────────────────────────────────────────────────
+document.querySelectorAll('.tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.pane').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById(`pane-${tab.dataset.tab}`).classList.add('active');
+  });
+});
+
+// ── Log filters ───────────────────────────────────────────────────────────────
+document.querySelectorAll('.filter-btn').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.filter-btn').forEach(b => b.classList.remove('active'));
+    btn.classList.add('active');
+    logFilter = btn.dataset.level;
+    rerenderLogs();
+  });
+});
+
+document.getElementById('log-search').addEventListener('input', (e) => {
+  logSearch = e.target.value.toLowerCase();
+  rerenderLogs();
+});
+
+// ── Load existing logs on page load ──────────────────────────────────────────
+async function loadExistingLogs() {
+  const res = await fetch('/logs');
+  const logs = await res.json();
+  for (const entry of logs) appendLog(entry);
+}
+
+async function loadExistingTranscript() {
+  const res = await fetch('/transcript');
+  const items = await res.json();
+  for (const item of items) appendMessage(item.role, item.text, item.ts);
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────────
+function escapeHtml(str) {
+  return String(str)
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;');
+}
+
+// ── Init ─────────────────────────────────────────────────────────────────────
+(async () => {
+  connectWS();
+  await loadExistingLogs();
+  await loadExistingTranscript();
+  const statusRes = await fetch('/status');
+  const { active } = await statusRes.json();
+  updateStatus(active ? 'running' : 'stopped');
+})();
+</script>
+</body>
+</html>
