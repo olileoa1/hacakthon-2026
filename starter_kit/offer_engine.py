@@ -172,6 +172,11 @@ TV_ADDON_NAME = TV_PLANS[1]["name"]          # A1 Xplore TV M
 
 VOICE_ONLY_DISCOUNT = 5.0  # EUR/month discount for existing customers
 
+
+def min_speed_for_users(num_users: int) -> int:
+    """Minimum recommended speed (Mbps): 50 Mbps per user."""
+    return max(50, (num_users or 1) * 50)
+
 ProductType = Literal["FIX", "CUBE"]
 
 
@@ -198,11 +203,10 @@ class Offer:
 
     @property
     def effective_price(self) -> float:
+        """Internet plan price only — voice discount applies to customer's voice contract, not here."""
         total = self.price
         if self.tv_included:
             total += self.tv_price
-        if self.voice_only_discount:
-            total -= VOICE_ONLY_DISCOUNT
         return total
 
     def summary(self) -> str:
@@ -214,10 +218,13 @@ class Offer:
         if self.setup_fee > 0:
             parts.append(f"Setup fee: {self.setup_fee:.2f} EUR (one-time)")
         if self.voice_only_discount:
-            parts.append(f"Existing customer discount: -{VOICE_ONLY_DISCOUNT:.2f} EUR/month")
+            parts.append(
+                f"Note: customer is an existing A1 client — they receive a {VOICE_ONLY_DISCOUNT:.0f} EUR/month "
+                f"discount on their VOICE contract (not on this internet plan)"
+            )
         if self.tv_included:
             parts.append(f"+ {self.tv_name}: +{self.tv_price:.2f} EUR/month (first year)")
-        parts.append(f"Total from month 7: {self.effective_price:.2f} EUR/month")
+        parts.append(f"Internet total from month 7: {self.effective_price:.2f} EUR/month")
         return " | ".join(parts)
 
 
@@ -225,9 +232,12 @@ class Offer:
 # Plan selection helpers
 # ---------------------------------------------------------------------------
 
-def _best_plan(plans: list[dict], max_speed: int) -> Optional[dict]:
-    """Return the fastest plan that does not exceed max_speed, or None if none qualify."""
-    eligible = [p for p in plans if p["speed"] <= max_speed]
+def _best_plan(plans: list[dict], max_speed: int, min_speed: int = 0) -> Optional[dict]:
+    """Return the fastest plan within [min_speed, max_speed], or None if none qualify."""
+    eligible = [p for p in plans if min_speed <= p["speed"] <= max_speed]
+    if not eligible:
+        # Fallback: ignore min_speed if no plan meets it (address can't deliver enough)
+        eligible = [p for p in plans if p["speed"] <= max_speed]
     if not eligible:
         return None
     return max(eligible, key=lambda p: p["speed"])
@@ -259,19 +269,20 @@ def build_offer(
     fix_max_speed: int,
     cube_max_speed: int,
     is_existing_customer: bool = False,
+    min_speed: int = 0,
 ) -> Offer:
     if product == "FIX":
-        plan = _best_plan(FIX_PLANS, fix_max_speed)
+        plan = _best_plan(FIX_PLANS, fix_max_speed, min_speed)
         # Fallback to CUBE if no FIX plan fits the address speed
         if plan is None:
             product = "CUBE"
-            plan = _best_plan(CUBE_PLANS, cube_max_speed)
+            plan = _best_plan(CUBE_PLANS, cube_max_speed, min_speed)
     else:
-        plan = _best_plan(CUBE_PLANS, cube_max_speed)
+        plan = _best_plan(CUBE_PLANS, cube_max_speed, min_speed)
         # Fallback to FIX if no CUBE plan fits the address speed
         if plan is None:
             product = "FIX"
-            plan = _best_plan(FIX_PLANS, fix_max_speed)
+            plan = _best_plan(FIX_PLANS, fix_max_speed, min_speed)
 
     if plan is None:
         raise ValueError(

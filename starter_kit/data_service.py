@@ -98,7 +98,7 @@ def lookup_address(plz: str, street_name: str, door_number: str) -> Optional[Add
     return None
 
 
-SIMILARITY_THRESHOLD = 0.6  # minimum score to suggest a fuzzy match
+SIMILARITY_THRESHOLD = 0.45  # minimum score to suggest a fuzzy match
 
 
 def find_similar_address(

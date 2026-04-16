@@ -165,6 +165,32 @@ def _run_bot(shutdown_event: threading.Event) -> None:
                 seen_streets.add(s)
     except Exception as _e:
         logger.warning("Could not load street names for phrase hints: %s", _e)
+
+    # Also add all customer first names and surnames from the DB
+    try:
+        from data_service import _customers as _cust_data
+        seen_names: set[str] = set()
+        for _row in _cust_data:
+            for _field in ("first_name", "surname"):
+                n = _row.get(_field, "").strip()
+                if n and n not in seen_names:
+                    phrase_list.addPhrase(n)
+                    seen_names.add(n)
+        logger.info("Loaded %d name hints for STT", len(seen_names))
+    except Exception as _e:
+        logger.warning("Could not load customer names for phrase hints: %s", _e)
+
+    # Add door numbers as phrase hints so STT doesn't confuse "6" with "S6" etc.
+    try:
+        seen_doors: set[str] = set()
+        for _row in _addr_data:
+            d = _row.get("door_number", "").strip()
+            if d and d not in seen_doors:
+                phrase_list.addPhrase(d)
+                seen_doors.add(d)
+    except Exception as _e:
+        logger.warning("Could not load door numbers for phrase hints: %s", _e)
+
     for phrase in _BOOST_PHRASES:
         phrase_list.addPhrase(phrase)
 
@@ -334,17 +360,19 @@ def _run_bot(shutdown_event: threading.Event) -> None:
 
         return normalized
 
+    _last_partial: dict = {"text": "", "at": 0.0}  # shared via closure
+
     def on_recognized(evt: speechsdk.SpeechRecognitionEventArgs) -> None:
         nonlocal speech_started_at, bot_is_speaking
         if evt.result.reason == speechsdk.ResultReason.RecognizedSpeech:
             raw = evt.result.text.strip()
             if not raw or len(raw) < 2:
                 return
+            _last_partial["text"] = ""  # clear — final result arrived
             text = _normalize_stt(raw)
             if raw != text:
                 logger.info("STT normalized: %r → %r", raw, text)
             if bot_is_speaking:
-                # Barge-in via full recognized utterance — interrupt bot and process
                 logger.info("STT barge-in (recognized while bot speaking): %r", text)
                 bot_is_speaking = False
                 interrupt_speech()
@@ -360,16 +388,29 @@ def _run_bot(shutdown_event: threading.Event) -> None:
             _queue_user_text(text)
         elif evt.result.reason == speechsdk.ResultReason.NoMatch:
             speech_started_at = None
-            logger.info("STT: no match")
+            # If there was a recent partial (< 3 s ago), use it — Azure sometimes
+            # returns NoMatch for short words like surnames or single-digit IDs.
+            partial = _last_partial["text"]
+            partial_age = time.monotonic() - _last_partial["at"]
+            if partial and len(partial) >= 2 and partial_age < 3.0:
+                text = _normalize_stt(partial)
+                logger.info("STT NoMatch — falling back to last partial: %r", text)
+                _last_partial["text"] = ""
+                mute_remaining = POST_SPEECH_MUTE_SEC - (time.monotonic() - bot_stopped_speaking_at)
+                if mute_remaining <= 0:
+                    _queue_user_text(text)
+            else:
+                logger.info("STT: no match")
 
     def on_recognizing(evt: speechsdk.SpeechRecognitionEventArgs) -> None:
-        # STT is stopped while bot speaks, so this only fires when user talks
         nonlocal speech_started_at
         if evt.result.reason != speechsdk.ResultReason.RecognizingSpeech:
             return
         partial = evt.result.text.strip()
         if not partial:
             return
+        _last_partial["text"] = partial
+        _last_partial["at"] = time.monotonic()
         logger.info("STT partial: %r", partial)
 
     def on_canceled(evt: speechsdk.SpeechRecognitionCanceledEventArgs) -> None:
@@ -395,6 +436,11 @@ def _run_bot(shutdown_event: threading.Event) -> None:
     speech_recognizer.recognized.connect(on_recognized)
     speech_recognizer.canceled.connect(on_canceled)
     speech_recognizer.start_continuous_recognition_async().get()
+
+    # Bot opens the call — generate greeting before waiting for customer
+    opening = bot.handle_turn(None)
+    if opening:
+        speak_text(opening)
     logger.info("STT started — waiting for customer to speak (language: %s)", recognition_language)
 
     try:
@@ -406,7 +452,8 @@ def _run_bot(shutdown_event: threading.Event) -> None:
         recognized_queue.put("__STOP__")
         worker_thread.join(timeout=5)
 
-        if bot.fsm.state != State.GREETING:
+        d = bot.fsm.data
+        if bot.fsm.state != State.GREETING and (d.first_name or d.surname):
             summary = bot.fsm.session_summary()
             SESSIONS_DIR = os.path.join(os.path.dirname(__file__), "..", "sessions")
             os.makedirs(SESSIONS_DIR, exist_ok=True)
@@ -415,7 +462,6 @@ def _run_bot(shutdown_event: threading.Event) -> None:
             with open(path, "w", encoding="utf-8") as f:
                 f.write(summary)
             logger.info("Session saved to %s", path)
-
         _push_event({"type": "status", "status": "stopped"})
 
 

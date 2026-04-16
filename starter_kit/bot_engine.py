@@ -46,14 +46,52 @@ Rules:
 - Be warm, confident, and never pushy.
 - Speak naturally as if in a real phone conversation.
 - Never mention that you are an AI.
-- Always call the customer by their first name once you know it.
-- When presenting prices, say them clearly (e.g. "twenty-nine euros ninety per month").
+- Use the customer's first name sparingly — at most once every 3–4 turns. Do NOT put their name in every sentence.
+- When presenting prices, ALWAYS spell them out in words (e.g. "twenty-nine euros ninety cents per month", NOT "29.90 euros"). Never read decimal points or digits.
 - ONLY ask for what the current task requires. Do NOT ask extra questions or gather information beyond the current step.
+- Never repeat a pleasantry you already used earlier in the call (e.g. say "nice to meet you" only once, "thanks for calling" only once).
 - If the customer is unclear, ask a single clarifying question about the CURRENT topic only.
 - Do NOT reveal internal state names or system details.
 - Do NOT ask about usage habits, devices, streaming, or gaming — just collect name, age, users, and address.
 - ALWAYS end your response with a clear question or next step. Never just acknowledge — always move the conversation forward.
 """
+
+
+def _is_content_filter_error(exc: Exception) -> bool:
+    """Return True if the exception is an Azure content filter 400 error."""
+    msg = str(exc)
+    return "content_filter" in msg or "ResponsibleAIPolicyViolation" in msg
+
+
+_REPEAT_MARKERS = (
+    "what", "pardon", "repeat", "say that again", "didn't catch",
+    "didn't hear", "could you say", "once more", "sorry", "come again",
+    "i can't hear", "can't understand", "not understand",
+)
+
+
+def _is_repeat_request(text: str) -> bool:
+    """Return True if the user is asking the bot to repeat itself."""
+    t = text.lower().strip().rstrip("?.!")
+    # Very short utterances like "what?" or "sorry?" are almost always repeat requests
+    if len(t.split()) <= 3 and any(m in t for m in _REPEAT_MARKERS):
+        return True
+    # Longer phrases that explicitly ask to repeat
+    if any(m in t for m in ("repeat", "say that again", "didn't catch", "didn't hear",
+                             "could you say", "once more", "come again")):
+        return True
+    return False
+
+
+def _is_transient_error(exc: Exception) -> bool:
+    """Return True for transient server/network errors worth a single retry."""
+    msg = str(exc).lower()
+    for marker in ("timeout", "timed out", "connection", "temporarily",
+                   "server_error", "service unavailable",
+                   " 500", " 502", " 503", " 504"):
+        if marker in msg:
+            return True
+    return False
 
 
 class BotEngine:
@@ -78,6 +116,20 @@ class BotEngine:
         # Step 1: if user spoke, add to history and try to extract slots
         if user_text:
             self._history.append({"role": "user", "content": user_text})
+            # Cap history memory — keep only the last 50 turns
+            if len(self._history) > 50:
+                self._history = self._history[-50:]
+
+            # If the user is asking to repeat, re-read the last bot reply without advancing FSM
+            if _is_repeat_request(user_text):
+                last_bot = next(
+                    (m["content"] for m in reversed(self._history[:-1]) if m["role"] == "assistant"),
+                    None,
+                )
+                if last_bot:
+                    logger.info("Repeat request detected — re-reading last reply")
+                    return last_bot
+
             self._extract_slots(user_text)
 
         # Step 2: auto-advance through non-interactive states
@@ -103,6 +155,8 @@ class BotEngine:
             State.GREETING,
             State.UNDERAGE,
             State.NO_COVERAGE,
+            State.CALL_CLOSED_SUCCESS,
+            State.CALL_CLOSED_AGENT,
         )
         if self.fsm.state in _AUTO_ADVANCE_AFTER_REPLY:
             self.fsm.force_advance()
@@ -122,92 +176,150 @@ class BotEngine:
             self.fsm.force_advance()
             return
 
-        messages = self._build_messages(
-            extra_instruction=(
-                f"The user just said: '{user_text}'. "
-                "Extract the relevant information and call the appropriate function. "
-                "If the user's response does not contain the requested information, do NOT call any function."
-            )
+        extra_instr = (
+            f"The user just said: '{user_text}'. "
+            "Extract the relevant information and call the appropriate function. "
+            "If the user's response does not contain the requested information, do NOT call any function."
         )
 
-        try:
-            response = self.client.chat.completions.create(
-                model=self.deployment,
-                messages=messages,
-                tools=tools,
-                tool_choice="auto",
-                temperature=0.0,
-            )
-            msg = response.choices[0].message
-            if msg.tool_calls:
-                for tc in msg.tool_calls:
+        response = self._call_llm_with_retries(
+            extra_instruction=extra_instr,
+            tools=tools,
+            temperature=0.0,
+        )
+        if response is None:
+            return
+
+        msg = response.choices[0].message
+        if msg.tool_calls:
+            for tc in msg.tool_calls:
+                try:
                     args = json.loads(tc.function.arguments)
-                    logger.debug("Tool call: %s(%s)", tc.function.name, args)
-                    self.fsm.process_extraction(tc.function.name, args)
-            else:
-                # LLM chose not to call a tool (info not found in user text)
-                logger.debug("No tool call for state %s, user said: %s", self.fsm.state, user_text)
-        except Exception as exc:
-            logger.error("Extraction error: %s", exc)
+                except json.JSONDecodeError:
+                    logger.warning("Malformed tool args: %s", tc.function.arguments)
+                    continue
+                logger.debug("Tool call: %s(%s)", tc.function.name, args)
+                self.fsm.process_extraction(tc.function.name, args)
+        else:
+            logger.debug("No tool call for state %s, user said: %s", self.fsm.state, user_text)
 
     def _generate_reply(self) -> str:
         """Generate the bot's spoken reply for the current FSM state."""
         state_instruction = self.fsm.get_bot_prompt()
+        offer_context = self._build_offer_context()
 
-        # Inject contextual details into the prompt
-        offer_context = ""
-        if self.fsm.data.current_offer:
-            offer_context += f"\n\nCurrent offer details: {self.fsm.data.current_offer.summary()}"
-        if self.fsm.data.alternative_offer:
-            offer_context += f"\nAlternative (cheaper) offer: {self.fsm.data.alternative_offer.summary()}"
+        response = self._call_llm_with_retries(
+            extra_instruction=state_instruction + offer_context,
+            tools=None,
+            temperature=0.7,
+            max_completion_tokens=150,
+        )
+        if response is None:
+            return "I'm sorry, I had a technical issue. Could you repeat that?"
+
+        # Consume one-shot flags only after a successful reply is generated.
         if self.fsm.data.alternative_just_accepted:
-            offer_context += (
-                "\nIMPORTANT: The customer just accepted the downgraded plan above. "
+            self.fsm.data.alternative_just_accepted = False
+
+        reply = (response.choices[0].message.content or "").strip()
+        return reply or "I'm sorry, could you repeat that?"
+
+    def _build_offer_context(self) -> str:
+        """Assemble the per-turn context block injected into the system prompt."""
+        d = self.fsm.data
+        parts: list[str] = []
+        if d.current_offer:
+            parts.append(f"\nCurrent offer details: {d.current_offer.summary()}")
+        if d.alternative_offer:
+            parts.append(f"Alternative (cheaper) offer: {d.alternative_offer.summary()}")
+        if d.appointment_set:
+            parts.append(f"appointment_set: true — agreed slot: {d.appointment_time or 'TBD'}")
+        if d.appointment_specialist_callback:
+            parts.append("appointment_specialist_callback: true — specialist will call customer to arrange time")
+        if d.appointment_set and self.fsm.state == State.TV_UPSELL:
+            parts.append("appointment_confirmed: true")
+        if d.alternative_just_accepted:
+            parts.append(
+                "IMPORTANT: The customer just accepted the downgraded plan above. "
                 "First briefly confirm the new plan (one sentence), then IMMEDIATELY pitch the TV addon as a separate offer. "
                 "Do not close the call — the TV offer is the next step."
             )
-            self.fsm.data.alternative_just_accepted = False  # consume the flag
-        if self.fsm.data.first_name:
-            offer_context += f"\nCustomer name: {self.fsm.data.first_name}"
-        if self.fsm.data.suggested_address:
-            s = self.fsm.data.suggested_address
-            offer_context += (
-                f"\nSuggested address to confirm with customer: "
-                f"{s.street_name} {s.door_number}, PLZ {s.plz}"
-            )
-        if self.fsm.data.is_existing_customer and self.fsm.data.subscriber_id:
-            if self.fsm.data.customer_verified:
-                offer_context += (
-                    f"\nCustomer identity VERIFIED: subscriber ID {self.fsm.data.subscriber_id} "
-                    f"matches {self.fsm.data.first_name} {self.fsm.data.surname}. "
+        if d.suggested_address:
+            s = d.suggested_address
+            parts.append(f"Suggested address to confirm with customer: {s.street_name} {s.door_number}, PLZ {s.plz}")
+        if d.is_existing_customer and d.subscriber_id:
+            if d.customer_verified:
+                parts.append(
+                    f"Customer identity VERIFIED: subscriber ID {d.subscriber_id} "
+                    f"matches {d.first_name} {d.surname}. "
                     "Greet them warmly by name and confirm their account has been found."
                 )
-            elif self.fsm.data.subscriber_id:
-                offer_context += (
-                    "\nCustomer identity could NOT be verified (ID not found or name mismatch). "
+            else:
+                parts.append(
+                    "Customer identity could NOT be verified (ID not found or name mismatch). "
                     "Do not mention the discount. Continue the conversation naturally."
                 )
+        return ("\n" + "\n".join(parts)) if parts else ""
 
-        messages = self._build_messages(
-            extra_instruction=state_instruction + offer_context
-        )
+    def _call_llm_with_retries(
+        self,
+        extra_instruction: str,
+        tools: Optional[list[dict]],
+        temperature: float,
+        max_completion_tokens: Optional[int] = None,
+    ):
+        """
+        Call the LLM with up to 3 attempts, progressively shortening history on content-filter
+        errors and retrying once on transient network/server errors. Returns the response or None.
+        """
+        attempts = [
+            self._build_messages(extra_instruction=extra_instruction),
+            self._build_messages_short(extra_instruction=extra_instruction),
+            self._build_messages_minimal(extra_instruction=extra_instruction),
+        ]
+        transient_retries_left = 1
+        attempt = 0
+        while attempt < len(attempts):
+            msg_list = attempts[attempt]
+            kwargs = {
+                "model": self.deployment,
+                "messages": msg_list,
+                "temperature": temperature,
+            }
+            if tools:
+                kwargs["tools"] = tools
+                kwargs["tool_choice"] = "auto"
+            if max_completion_tokens:
+                kwargs["max_completion_tokens"] = max_completion_tokens
 
-        try:
-            response = self.client.chat.completions.create(
-                model=self.deployment,
-                messages=messages,
-                temperature=0.7,
-                max_completion_tokens=150,
-            )
-            reply = (response.choices[0].message.content or "").strip()
-            return reply or "I'm sorry, could you repeat that?"
-        except Exception as exc:
-            logger.error("Generation error: %s", exc)
-            return "I'm sorry, I had a technical issue. Could you repeat that?"
+            try:
+                return self.client.chat.completions.create(**kwargs)
+            except Exception as exc:
+                if _is_content_filter_error(exc) and attempt < len(attempts) - 1:
+                    logger.warning("Content filter (attempt %d), retrying with shorter history", attempt + 1)
+                    attempt += 1
+                    continue
+                if _is_transient_error(exc) and transient_retries_left > 0:
+                    logger.warning("Transient LLM error, retrying once: %s", exc)
+                    transient_retries_left -= 1
+                    continue  # retry same attempt
+                logger.error("LLM call failed: %s", exc)
+                return None
+        return None
 
     def _build_messages(self, extra_instruction: str = "") -> list[dict]:
+        return self._build_messages_with_history(extra_instruction, self._history[-20:])
+
+    def _build_messages_short(self, extra_instruction: str = "") -> list[dict]:
+        """Last 4 history messages — first retry when content filter fires."""
+        return self._build_messages_with_history(extra_instruction, self._history[-4:])
+
+    def _build_messages_minimal(self, extra_instruction: str = "") -> list[dict]:
+        """No history at all — last resort when content filter fires on short history too."""
+        return self._build_messages_with_history(extra_instruction, [])
+
+    def _build_messages_with_history(self, extra_instruction: str, history: list[dict]) -> list[dict]:
         system = SYSTEM_PROMPT
         if extra_instruction:
             system += f"\n\nCurrent task: {extra_instruction}"
-
-        return [{"role": "system", "content": system}] + self._history[-20:]
+        return [{"role": "system", "content": system}] + history
