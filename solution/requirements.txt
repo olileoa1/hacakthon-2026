@@ -1,0 +1,5 @@
+streamlit
+openai
+azure-cognitiveservices-speech
+python-dotenv
+rapidfuzz

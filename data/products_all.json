@@ -1,0 +1,154 @@
+[
+  {
+    "product_id": "GF1000",
+    "name": "Glasfaser Internet 1000",
+    "technology": "Fiber",
+    "speed": {
+      "download_mbps": 1000,
+      "upload_mbps": 250
+    },
+    "pricing": {
+      "currency": "EUR",
+      "months_1_to_6": 0.0,
+      "months_7_to_24": 74.9,
+      "months_25_plus": 74.9
+    },
+    "setup_fee": 29.9,
+    "modem_included": true,
+    "data_volume": "Unlimited",
+    "discount": "First 6 months free"
+  },
+  {
+    "product_id": "GF500",
+    "name": "Glasfaser Internet 500",
+    "technology": "Fiber",
+    "speed": {
+      "download_mbps": 500,
+      "upload_mbps": 100
+    },
+    "pricing": {
+      "currency": "EUR",
+      "months_1_to_6": 0.0,
+      "months_7_to_24": 43.92,
+      "months_25_plus": 54.9
+    },
+    "setup_fee": 29.9,
+    "modem_included": true,
+    "data_volume": "Unlimited",
+    "discount": "20 percent discount on base fee until month 24"
+  },
+  {
+    "product_id": "GF250",
+    "name": "Glasfaser Internet 250",
+    "technology": "Fiber",
+    "speed": {
+      "download_mbps": 250,
+      "upload_mbps": 100
+    },
+    "pricing": {
+      "currency": "EUR",
+      "months_1_to_6": 0.0,
+      "months_7_to_24": 29.9,
+      "months_25_plus": 29.9
+    },
+    "setup_fee": 29.9,
+    "modem_included": true,
+    "data_volume": "Unlimited",
+    "discount": "Special price after free period"
+  },
+  {
+    "product_id": "CUBE500",
+    "name": "Cube Internet 500",
+    "technology": "5G",
+    "speed": {
+      "download_mbps": 500,
+      "upload_mbps": 70
+    },
+    "pricing": {
+      "currency": "EUR",
+      "months_1_to_6": 0.0,
+      "months_7_to_24": 54.9,
+      "months_25_plus": 54.9
+    },
+    "setup_fee": 0.0,
+    "modem_included": false,
+    "data_volume": "Unlimited",
+    "discount": "First 6 months free"
+  },
+  {
+    "product_id": "CUBE250",
+    "name": "Cube Internet 250",
+    "technology": "5G",
+    "speed": {
+      "download_mbps": 250,
+      "upload_mbps": 50
+    },
+    "pricing": {
+      "currency": "EUR",
+      "months_1_to_6": 0.0,
+      "months_7_to_24": 29.9,
+      "months_25_plus": 29.9
+    },
+    "setup_fee": 0.0,
+    "modem_included": false,
+    "data_volume": "Unlimited",
+    "discount": "Special price after free period"
+  },
+  {
+    "product_id": "CUBE150",
+    "name": "Cube Internet 150",
+    "technology": "5G",
+    "speed": {
+      "download_mbps": 150,
+      "upload_mbps": 30
+    },
+    "pricing": {
+      "currency": "EUR",
+      "months_1_to_6": 0.0,
+      "months_7_to_24": 29.9,
+      "months_25_plus": 29.9
+    },
+    "setup_fee": 0.0,
+    "modem_included": false,
+    "data_volume": "Unlimited",
+    "discount": "First 6 months free"
+  },
+  {
+    "product_id": "TVS",
+    "name": "A1 Xplore TV S",
+    "technology": "IPTV",
+    "speed": {
+      "download_mbps": null,
+      "upload_mbps": null
+    },
+    "pricing": {
+      "currency": "EUR",
+      "months_1_to_6": 3.9,
+      "months_7_to_24": 3.9,
+      "months_25_plus": 3.9
+    },
+    "setup_fee": 0.0,
+    "modem_included": false,
+    "data_volume": null,
+    "discount": "No binding, TV box required (4.90 EUR per month)"
+  },
+  {
+    "product_id": "TVM",
+    "name": "A1 Xplore TV M",
+    "technology": "IPTV",
+    "speed": {
+      "download_mbps": null,
+      "upload_mbps": null
+    },
+    "pricing": {
+      "currency": "EUR",
+      "months_1_to_6": 4.95,
+      "months_7_to_24": 4.95,
+      "months_25_plus": 9.9
+    },
+    "setup_fee": 0.0,
+    "modem_included": false,
+    "data_volume": null,
+    "discount": "Half price in first year, 7 days catch-up TV, TV box required (4.90 EUR per month)"
+  }
+]

@@ -1,0 +1,14 @@
+{
+  "products": [
+    {
+      "id": "small",
+      "speed_mbps": 100,
+      "price_eur": 10
+    },
+    {
+      "id": "big",
+      "speed_mbps": 250,
+      "price_eur": 20
+    }
+  ]
+}
